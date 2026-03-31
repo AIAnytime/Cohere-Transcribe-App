@@ -1,0 +1,159 @@
+Cohere Transcribe - ONNX
+ONNX conversion of CohereLabs/cohere-transcribe-03-2026, a 2B parameter Conformer-based speech recognition model supporting 14 languages.
+
+Runs locally with ONNX Runtime in Python, C#, C++, Java, JavaScript, or any ONNX-compatible runtime. No Python, no cloud APIs, no GPU required.
+
+What's Included
+INT8 dynamically quantized ONNX model (2.75 GB total):
+
+File	Size	Description
+cohere-encoder.int8.onnx	3 MB	Encoder graph (weights in .data file)
+cohere-encoder.int8.onnx.data	2.6 GB	Encoder weights
+cohere-decoder.int8.onnx	147 MB	Decoder (self-contained)
+tokens.txt	219 KB	16,384-entry vocabulary
+Plus:
+
+Export and quantization scripts (reproduce FP32 or re-quantize from the original model)
+C# inference example
+Complete porting guide with all concepts explained
+Quick Start (Python)
+pip install onnxruntime numpy soundfile librosa
+
+import onnxruntime as ort
+import numpy as np
+import librosa
+
+# Load audio (must be 16kHz mono)
+audio, sr = librosa.load("your_audio.wav", sr=16000, mono=True)
+
+# Load models
+enc = ort.InferenceSession("cohere-encoder.int8.onnx")
+dec = ort.InferenceSession("cohere-decoder.int8.onnx")
+
+# Load tokens
+tokens = {}
+with open("tokens.txt", "r", encoding="utf-8") as f:
+    for line in f:
+        parts = line.strip().rsplit(" ", 1)
+        if len(parts) == 2:
+            tokens[int(parts[1])] = parts[0]
+token_to_id = {v: k for k, v in tokens.items()}
+
+# Build prompt (change <|en|> to <|de|>, <|fr|>, etc.)
+prompt_ids = [token_to_id[t] for t in [
+    "<|startofcontext|>", "<|startoftranscript|>", "<|emo:undefined|>",
+    "<|en|>", "<|en|>", "<|pnc|>", "<|noitn|>", "<|notimestamp|>", "<|nodiarize|>"
+]]
+
+# Run encoder (raw audio in, encoder representations out)
+cross_k, cross_v = enc.run(None, {"audio": audio.reshape(1, -1).astype(np.float32)})
+
+# Run decoder (autoregressive greedy decoding)
+N_LAYERS, HEADS, HEAD_DIM, MAX_CTX = 8, 8, 128, 1024
+self_k = np.zeros((N_LAYERS, 1, HEADS, MAX_CTX, HEAD_DIM), dtype=np.float32)
+self_v = np.zeros((N_LAYERS, 1, HEADS, MAX_CTX, HEAD_DIM), dtype=np.float32)
+eos_id = token_to_id["<|endoftext|>"]
+
+generated = list(prompt_ids)
+current = np.array([prompt_ids], dtype=np.int64)
+offset = np.array(0, dtype=np.int64)
+
+for _ in range(256):
+    logits, self_k, self_v = dec.run(None, {
+        "tokens": current, "in_n_layer_self_k_cache": self_k,
+        "in_n_layer_self_v_cache": self_v, "n_layer_cross_k": cross_k,
+        "n_layer_cross_v": cross_v, "offset": offset,
+    })
+    next_id = int(np.argmax(logits[0, -1, :]))
+    if next_id == eos_id:
+        break
+    generated.append(next_id)
+    offset = np.array(int(offset) + current.shape[1], dtype=np.int64)
+    current = np.array([[next_id]], dtype=np.int64)
+
+# Decode to text
+text = "".join(
+    tokens.get(t, "").replace("\u2581", " ")
+    for t in generated[len(prompt_ids):]
+    if not tokens.get(t, "").startswith("<|")
+).strip()
+print(text)
+
+Quick Start (C#)
+dotnet add package Microsoft.ML.OnnxRuntime
+
+See CohereTranscribe.cs for a complete example. For GPU acceleration on Windows:
+
+dotnet add package Microsoft.ML.OnnxRuntime.DirectML
+
+Supported Languages
+Code	Language	Code	Language
+en	English	nl	Dutch
+de	German	pl	Polish
+fr	French	el	Greek
+es	Spanish	ar	Arabic
+it	Italian	ja	Japanese
+pt	Portuguese	zh	Chinese
+vi	Vietnamese	ko	Korean
+Change language by swapping <|en|> in the prompt to the desired language code.
+
+Performance (INT8)
+All benchmarks run on a Windows 11 machine with CPU only (no dedicated GPU), 24 GB shared RAM, using the INT8 variant. No special optimization or batching -- just sequential chunk-by-chunk processing.
+
+Audio	Language	Duration	Processing Time	Speed	Tokens Generated
+Voice memo	English	30.5s	5.4s	5.6x realtime	61
+Interview podcast (Mike Agugliaro / Jay Abraham)	English	57.1 min	14 min 53s	3.8x realtime	~14,500
+Language learning podcast (Easy German)	German	35.0 min	9 min 24s	3.7x realtime	~8,900
+What the Numbers Mean
+5.6x realtime means 1 second of audio is transcribed in ~0.18 seconds
+3.7-3.8x realtime on longer files (the slight slowdown vs short clips is because longer audio produces more decoder tokens per chunk)
+Encoder takes ~3.5-7s per 30s chunk (the heavy lifting -- 48 Conformer layers)
+Decoder takes ~1.5-3s per chunk depending on how many words are spoken
+Memory Usage
+Component	RAM
+Encoder session (loaded once)	~2.6 GB
+Decoder session (loaded once)	~146 MB
+Per-chunk inference overhead	~300-500 MB
+Decoder KV cache	~256 MB
+Peak total	~3.5-4 GB
+Peak RAM stays constant regardless of audio length -- only one chunk is in memory at a time. A 5-minute file and a 5-hour file use the same amount of RAM.
+
+GPU Acceleration
+These benchmarks are CPU-only. For GPU acceleration on Windows, use DirectML (works with any DirectX 12 GPU -- AMD, NVIDIA, Intel). Expected 3-5x additional speedup, bringing throughput to 15-25x realtime.
+
+Long Audio
+The encoder handles up to ~35 seconds per call. For longer audio, split into overlapping chunks:
+
+Chunk size: 30 seconds
+Overlap: 5 seconds
+Stride: 25 seconds
+Transcribe each chunk, join results with spaces.
+
+How This Was Made
+The original PyTorch model was converted to ONNX with several engineering adaptations:
+
+Feature extraction baked in -- The encoder takes raw 16kHz audio, not mel spectrograms. STFT is implemented via Conv1d DFT filters (since torch.stft doesn't export to ONNX).
+
+Cross-attention K/V pre-computed -- The encoder pre-computes Key/Value projections for all 8 decoder layers, matching the Whisper-style encoder-decoder ONNX pattern.
+
+Selective quantization -- INT8 quantization protects convolutional and batch normalization layers in the audio frontend for accuracy preservation.
+
+See PORTING_GUIDE.md for the complete technical writeup with every concept explained.
+
+ONNX Tensor Contract
+Encoder
+Input:   audio              (batch, samples)       float32, raw 16kHz mono
+Output:  n_layer_cross_k    (8, batch, T', 1024)   float32
+         n_layer_cross_v    (8, batch, T', 1024)   float32
+
+Decoder
+Input:   tokens                    (batch, n_tokens)              int64
+         in_n_layer_self_k_cache   (8, batch, 8, 1024, 128)      float32
+         in_n_layer_self_v_cache   (8, batch, 8, 1024, 128)      float32
+         n_layer_cross_k           (8, batch, T', 1024)           float32
+         n_layer_cross_v           (8, batch, T', 1024)           float32
+         offset                    ()                              int64 scalar
+Output:  logits                    (batch, n_tokens, 16384)       float32
+         out_n_layer_self_k_cache  (8, batch, 8, 1024, 128)      float32
+         out_n_layer_self_v_cache  (8, batch, 8, 1024, 128)      float32
+

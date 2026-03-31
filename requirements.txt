@@ -1,0 +1,9 @@
+streamlit
+onnxruntime
+numpy
+soundfile
+librosa
+huggingface-hub
+yt-dlp
+pydub
+optimum[onnxruntime]
