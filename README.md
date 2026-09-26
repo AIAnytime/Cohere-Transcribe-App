@@ -47,3 +47,7 @@ Arabic, Chinese, Dutch, English, French, German, Greek, Italian, Japanese, Korea
 - ONNX: [onnx-community/cohere-transcribe-03-2026-ONNX](https://huggingface.co/onnx-community/cohere-transcribe-03-2026-ONNX)
 - Quantization options: INT8, Q4, FP16
 - Runs on CPU (~3.5 GB RAM)
+
+## License
+
+Proprietary — all rights reserved. This code is published for viewing and evaluation only; no use, copying, modification, redistribution, commercial use, or use as AI/ML training data without written permission. See [LICENSE](LICENSE). Commercial licensing: aianytime07@gmail.com · sonu@aianytime.net.
